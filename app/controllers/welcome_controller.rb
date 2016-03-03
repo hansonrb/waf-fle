@@ -3,6 +3,8 @@ require 'uri'
 require 'geoip'
 
 class WelcomeController < ApplicationController
+  protect_from_forgery except: :index
+
   COMPRESSION = true
 
   def initialize 
@@ -10,23 +12,22 @@ class WelcomeController < ApplicationController
   end
 
   def index
-  	echo_init
-
     # mlog2waffle_debug = false
     matches = [];
     http_header = { 'USER' => '', 'PASS' => '' }
 
     request.headers.each do |header, value|
-      if header.casecmp('Authorization')
+      if header.casecmp('HTTP_AUTHORIZATION') == 0
+
       	next if !value.instance_of? String
         matches = value.scan(/^Basic\s([0-9a-zA-Z]+\={0,2})$/)
 
-        next if matches.blank?
+        next if matches.blank? || matches[0].blank?
+        
+        matches2 = Base64.decode64(matches[0][0]).scan( /^([0-9a-z\.\_\-]{5,30}):([0-9a-z\.\_\-\,\\?\\\|\!\@\#\$\%\&\*\(\)\=\+\[\]\{\}\>\<]{5,20})/i )
 
-        matches2 = Base64.decode64(matches[1]).scan( /^([0-9a-z\.\_\-]{5,30}):([0-9a-z\.\_\-\,\\?\\\|\!\@\#\$\%\&\*\(\)\=\+\[\]\{\}\>\<]{5,20})/i )
-
-        http_header['USER'] = matches2[1].downcase
-        http_header['PASS'] = matches2[2]
+        http_header['USER'] = matches2[0][0].downcase
+        http_header['PASS'] = matches2[0][1]
       end
       #if header == 'X-WAFFLE-Debug'
       #  mlog2waffle_debug = true if value == 'ON'
@@ -36,18 +37,16 @@ class WelcomeController < ApplicationController
     remote_address = request.remote_ip
 
     login_status = sensorLogin( remote_address, matches[1], http_header['USER'], http_header['PASS'] )
-    #login_status = sensorLogin( '172.18.18.104', matches[1], 'sensor1', 'abc123' )
 
     if login_status.present? && login_status['status'] == 1
       sensor_id = login_status['sensor_id']
       #helper:apache_setenv('REMOTE_USER', login_status['sensor_name'])
     elsif login_status.present? && login_status['status'] == 0
-      response.headers['Status'] = '403'
-      abort( '403' )
+      render :text => "Error: Login Status = 0", :status => 403, :layout => false
+      return
     else
-      response.headers['Status'] = '500'
-      #print 'Authentication Error\n' if mlog2waffle_debug
-      abort( 'Authentication Error' )
+      render :text => "Authentication Error", :status => 500, :layout => false
+      return
     end
 
     if login_status['sensor_client_ip_header'].present?
@@ -56,7 +55,7 @@ class WelcomeController < ApplicationController
 
     # Body: read and treatment
     # body = file('php://input')
-    body = request.body.read.split('\n')
+    body = request.body.read.split("\n")
     line = 0
     body_size = body.count
 
@@ -68,17 +67,17 @@ class WelcomeController < ApplicationController
 
     while line < body_size do
       if body[line].strip.scan( /^WAF\-FLE\ PROBE/i ).present?
-        # Probe ok, exiting now 
+        
         response.headers['X-WAF-FLE'] = 'READY';
         response.headers['Status'] = '200';
-        print 'WAF-FLE: READY\n'
+        render :text => "WAF-FLE: READY\n", :status => 200, :layout => false
         return
+      
       end
 
       # Phase A
       if body[line].strip.scan( /^\-\-[a-f0-9]+\-A\-\-$/i ).present?
         phase_a_full = nil
-        
 
         # audit log header (mandatory)
         while line < body_size do
@@ -88,6 +87,8 @@ class WelcomeController < ApplicationController
             matches_a = body[line].strip.scan( /^\[(\d{1,2})\/(\w{3})\/(\d{4})\:(\d{2}\:\d{2}\:\d{2})\s(\-\-\d{4}|\+\d{4})\]\s([a-zA-Z0-9\-\@]{24})\s([12]?[0-9]{1,2}\.[12]?[0-9]{1,2}\.[12]?[0-9]{1,2}\.[12]?[0-9]{1,2})\s(\d{1,5})\s([12]?[0-9]{1,2}\.[12]?[0-9]{1,2}\.[12]?[0-9]{1,2}\.[12]?[0-9]{1,2})\s(\d{1,5})/i )
             
             if matches_a.present?
+              matches_a = matches_a[0].unshift( nil )
+
               phase_a['Day'] = matches_a[1]
               months = [nil, 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -121,20 +122,27 @@ class WelcomeController < ApplicationController
             break
           else
             if ( matches_b = body[line].strip.scan( /^(GET|POST|HEAD|PUT|DELETE|TRACE|PROPFIND|OPTIONS|CONNECT|PATCH)\s(.+)\s(HTTP\/[01]\.[019])/i ) ).present?
+              matches_b = matches_b[0].unshift( nil )
+
               phase_b['Method']        = matches_b[1]
               phase_b['pathParameter'] = parse_url('http://dummy.ex' + matches_b[2], PHP_URL_QUERY)
               # pathParsed             = parse_url(matches_b[2], PHP_URL_PATH)
               phase_b['path']          = parse_url('http://dummy.ex' + matches_b[2], PHP_URL_PATH)
               phase_b['Protocol']      = matches_b[3]
             elsif ( matches_b = body[line].strip.scan( /^Host:\s(.+)/i ) ).present?
+              matches_b = matches_b[0].unshift( nil )
               phase_b['Host'] = matches_b[1]
             elsif ( matches_b = body[line].strip.scan( /^Content-Type:\s([\w\-\/]+)\\s([\w\-\\.\/\*\+\=\:\?\,\s\(\)]+)/i ) ).present?
+              matches_b = matches_b[0].unshift( nil )
               phase_b['Content-Type'] = matches_b[1]
             elsif ( matches_b = body[line].strip.scan( /^Referer:\s(.+)/i ) ).present?
+              matches_b = matches_b[0].unshift( nil )
               phase_b['Referer'] = matches_b[1]
             elsif ( matches_b = body[line].strip.scan( /^User-Agent:\s(.+)/i ) ).present?
+              matches_b = matches_b[0].unshift( nil )
               phase_b['User-Agent'] = matches_b[1]
             elsif login_status['sensor_client_ip_header'] != 1 && ( matches_b = body[line].strip.scan( /$clientIpHeaderRegExp/i ).present? )
+              matches_b = matches_b[0].unshift( nil )
               phase_a['ClientIP'] = matches_b[1]  # Set Client IP (to Phase A) when a HTTP Header is defined to carry real client ip, and sensor are marked to respect this
             end
 
@@ -182,14 +190,18 @@ class WelcomeController < ApplicationController
             break
           else
             if (matches_f = body[line].strip.scan( /^(HTTP\/\d\.\d)\s(\d\d\d)\s([\w\s]+)/i ) ).present?
+              matches_f = matches_f[0].unshift( nil )
               phase_f['Protocol'] = matches_f[1]
               phase_f['Status']   = matches_f[2]
               phase_f['MSG']      = matches_f[3]
             elsif ( matches_f = body[line].strip.scan( /^Content-Length:\s(\d+)/i ) ).present?
+              matches_f = matches_f[0].unshift( nil )
               phase_f['Content-Length'] = matches_f[1]
             elsif ( matches_f = body[line].strip.scan( /^Connection:\s([\w-]+)/i ) ).present?
+              matches_f = matches_f[0].unshift( nil )
               phase_f['Connection'] = matches_f[1]
             elsif ( matches_f = body[line].strip.scan( '/^Content-Type:\s((?:[\w\-\/]+)(?:\)?(?:\s)?(?:[\w\-\\.\/\*\+\=\:\?\,\s\(\)]+)?)/i' ) ).present?
+              matches_f = matches_f[0].unshift( nil )
               phase_f['Content-Type'] = matches_f[1]
               phase_f_full = phase_f_full + body[line]
               line+=1
@@ -215,6 +227,7 @@ class WelcomeController < ApplicationController
               message_start = 0
               # look for message Action
               if ( matches_h = current_h_line.scan( /^Message:\s((Warning|Access|Paus)(.*?))\.\s/i ) ).present?
+                matches_h = matches_h[0].unshift( nil )
                 phase_h_msg[hline]['Message_Action'] = matches_h[1]
 
                 ActionStatus.each do |key, statusValue|
@@ -240,6 +253,12 @@ class WelcomeController < ApplicationController
                 phase_h_msg[hline]['Message_RuleId'] = pcre_err_rule_id
 
                 pcre_rule_id = body[line].strip.scan( /id\s\"(\d+)\"/ )
+
+                if pcre_rule_id.present?
+                  pcre_rule_id = pcre_rule_id[0].unshift( nil ) 
+                else
+                  pcre_rule_id = [nil, '']
+                end
 
                 phase_h_msg[hline]['Message_Data'] = 'RuleId:' + pcre_rule_id[1]
                 phase_h_full = phase_h_full + body[line]
@@ -328,16 +347,17 @@ class WelcomeController < ApplicationController
                   phase_h_msg[hline]['Message_Msg'] = message_Msg
 
                   # Get Scores from msg
-                  if ( score = message_Msg.scan( '/Inbound Anomaly Score \(Total\sInbound\sScore:\s?(?P<In_Total>[\d]{1,4})?,\sSQLi=(?P<In_SQLi>[\d]{1,4})?,\s?XSS=(?P<In_XSS>[\d]{1,4})?/i' ) ).present?
-                    phase_h['Score']['In_Total'] = score['In_Total'] if score['In_Total'].present? && score['In_Total'] > phase_h['Score']['In_Total']
-                    phase_h['Score']['In_SQLi'] = score['In_SQLi'] if score['In_SQLi'].present? && score['In_SQLi'] > phase_h['Score']['In_SQLi']
-                    phase_h['Score']['In_XSS'] = score['In_XSS'] if score['In_XSS'].present? && score['In_XSS'] > phase_h['Score']['In_XSS']
-                  elsif ( score = message_Msg.scan( '/Inbound Anomaly Score Exceeded \(Total\sScore:\s?(?P<In_Total>[\d]{1,4})?,\sSQLi=(?P<In_SQLi>[\d]{1,4})?,\s?XSS=(?P<In_XSS>[\d]{1,4})?/i' ) ).present?
-                    phase_h['Score']['In_Total'] = score['In_Total'] if score['In_Total'].present? && score['In_Total'] > phase_h['Score']['In_Total']
-                    phase_h['Score']['In_SQLi'] = score['In_SQLi'] if score['In_SQLi'].present? && score['In_SQLi'] > phase_h['Score']['In_SQLi']
-                    phase_h['Score']['In_XSS'] = score['In_XSS'] if score['In_XSS'].present? && score['In_XSS'] > phase_h['Score']['In_XSS']
-                  elsif ( score = message_Msg.scan( '/Anomaly Score Exceeded \(score (?P<In_Total>\d{1,10})\):\s?(?P<trigger>.+)/i' ) ).present?
-                    phase_h['Score']['In_Total'] = score['In_Total'] if score['In_Total'].present? && score['In_Total'] > phase_h['Score']['In_Total']
+
+                  if ( score = /Inbound Anomaly Score \(Total\sInbound\sScore:\s?(?<In_Total>[\d]{1,4})?,\sSQLi=(?<In_SQLi>[\d]{1,4})?,\s?XSS=(?<In_XSS>[\d]{1,4})?/i.match( message_Msg ) ).present?
+                    phase_h['Score']['In_Total'] = score.In_Total if score.In_Total.present? && score.In_Total.to_i > phase_h['Score']['In_Total'].to_i
+                    phase_h['Score']['In_SQLi'] = score.In_SQLi if score.In_SQLi.present? && score.In_SQLi.to_i > phase_h['Score']['In_SQLi'].to_i
+                    phase_h['Score']['In_XSS'] = score.In_XSS if score.In_XSS.present? && score.In_XSS.to_i > phase_h['Score']['In_XSS'].to_i
+                  elsif ( score = /Inbound Anomaly Score Exceeded \(Total\sScore:\s?(?<In_Total>[\d]{1,4})?,\sSQLi=(?<In_SQLi>[\d]{1,4})?,\s?XSS=(?<In_XSS>[\d]{1,4})?/i.match( message_Msg ) ).present?
+                    phase_h['Score']['In_Total'] = score.In_Total if score.In_Total.present? && score.In_Total.to_i > phase_h['Score']['In_Total'].to_i
+                    phase_h['Score']['In_SQLi'] = score.In_SQLi if score.In_SQLi.present? && score.In_SQLi.to_i > phase_h['Score']['In_SQLi'].to_i
+                    phase_h['Score']['In_XSS'] = score.In_XSS if score.In_XSS.present? && score.In_XSS.to_i > phase_h['Score']['In_XSS'].to_i
+                  elsif ( score = /Anomaly Score Exceeded \(score (?<In_Total>\d{1,10})\):\s?(?<trigger>.+)/i.match( message_Msg ) ).present?
+                    phase_h['Score']['In_Total'] = score.In_Total if score.In_Total.present? && score.In_Total.to_i > phase_h['Score']['In_Total'].to_i
                   end
                   next
                 end
@@ -345,19 +365,23 @@ class WelcomeController < ApplicationController
               hline+=1
 
             elsif ( matches_h = body[line].strip.scan( /^Apache-Error:\s(?:\[file\s\"([\w\/\-\.]+)\"\].?)?(?:\[line\s(\d+)\].?)?(?:\[level\s(\d+)\].?)?([\w\:\/\.\-,\?\=\s]+)?/i ) ).present?
+              matches_h = matches_h[0].unshift( nil )
               phase_h['Apache_error-File']    = ( matches_h[1].present? ? matches_h[1] : nil)
               phase_h['Apache_error-Line']    = ( matches_h[2].present? ? matches_h[2] : nil)
               phase_h['Apache_error-Level']   = ( matches_h[3].present? ? matches_h[3] : nil)
               phase_h['Apache_error-Message'] = ( matches_h[4].present? ? matches_h[4].strip : nil)
             elsif ( matches_h = body[line].strip.scan( /^Action: Intercepted\s.*(\d)/i ) ).present?
+              matches_h = matches_h[0].unshift( nil )
               phase_h['Interception_phase'] = ( matches_h[1].present? ? matches_h[1] : nil)
             elsif ( matches_h = body[line].strip.scan( /^Stopwatch:\s(\d{16})\s([\d\-]+)\s\(([\d\-\*]+)\s([\d\-]+)\s([\d\-]+)\)/i ) ).present?
+              matches_h = matches_h[0].unshift( nil )
               phase_h['Stopwatch_Timestamp']         = ( matches_h[1].present? ? matches_h[1] : nil)  # number of microseconds since 00:00:00 january 1, 1970 UTC
               phase_h['Stopwatch_Duration']          = ( matches_h[2].present? ? matches_h[2] : nil)
               phase_h['Stopwatch_time_checkpoint_1'] = ( matches_h[3].present? ? matches_h[3] : nil)
               phase_h['Stopwatch_time_checkpoint_2'] = ( matches_h[4].present? ? matches_h[4] : nil)
               phase_h['Stopwatch_time_checkpoint_3'] = ( matches_h[5].present? ? matches_h[5] : nil)
             elsif ( matches_h = body[line].strip.scan( /^Stopwatch2:\s(\d{16})\s([\d\-]+)\scombined=(\d+),\sp1=(\d+),\sp2=(\d+),\sp3=(\d+),\sp4=(\d+),\sp5=(\d+),\ssr=(\d+),\ssw=(\d+),\sl=(\d+),\sgc=(\d+)$/i ) ).present?
+              matches_h = matches_h[0].unshift( nil )
               phase_h['Stopwatch2_Timestamp']         = ( matches_h[1].present? ? matches_h[1] : nil)  # number of microseconds since 00:00:00 january 1, 1970 UTC
               phase_h['Stopwatch2_duration']          = ( matches_h[2].present? ? matches_h[2] : nil)
               phase_h['Stopwatch2_combined'] = ( matches_h[3].present? ? matches_h[3] : nil)  # combined processing
@@ -371,7 +395,9 @@ class WelcomeController < ApplicationController
               $phase_h['Stopwatch2_l'] = ( matches_h[11].present? ? matches_h[11] : nil)  # time spent on audit log
               phase_h['Stopwatch2_gc'] = ( matches_h[12].present? ? matches_h[12] : nil)  # time spend on garbage collection
             elsif ( matches_h = body[line].strip.scan( /^(?:Producer|WAF):\s(.+\.)$/i ) ).present?
+              matches_h = matches_h[0].unshift( nil )
               if ( matches_h = body[line].strip.scan( /(.+)\s(.+)\.$/i ) ).present?
+                matches_h = matches_h[0].unshift( nil )
                 phase_h['Producer']         = ( prod[1].present? ? prod[1] : nil)
                 phase_h['Producer_ruleset'] = ( prod[2].present? ? prod[2] : nil)
               else
@@ -379,16 +405,21 @@ class WelcomeController < ApplicationController
                 phase_h['Producer_ruleset'] = nil
               end
             elsif ( matches_h = body[line].strip.scan( /^Server:\s(.+)/i ) ).present?
+              matches_h = matches_h[0].unshift( nil )
               phase_h['Server'] = ( matches_h[1].present? ? matches_h[1] : nil)
             elsif ( matches_h = body[line].strip.scan( /^WebApp-Info:\s\"(.+)\"\s\"(.+)\"\s\"(.+)\"/i ) ).present?
+              matches_h = matches_h[0].unshift( nil )
               phase_h['WebApp-Info_Application_ID'] = ( matches_h[1].present? ? matches_h[1] : nil)
               phase_h['WebApp-Info_Session_ID']     = ( matches_h[2].present? ? matches_h[2] : nil)
               phase_h['WebApp-Info_User_ID']        = ( matches_h[3].present? ? matches_h[3] : nil)
             elsif ( matches_h = body[line].strip.scan( /^Apache-Handler:\s(.+)/i ) ).present?
+              matches_h = matches_h[0].unshift( nil )
               phase_h['Apache-Handler'] = ( matches_h[1].present? ? matches_h[1] : nil)
             elsif ( matches_h = body[line].strip.scan( /^Response-Body-Transformed:\s(.+)/i ) ).present?
+              matches_h = matches_h[0].unshift( nil )
               phase_h['Response-Body-Transformed'] = ( matches_h[1].present? ? matches_h[1] : nil)
             elsif ( matches_h = body[line].strip.scan( /^Engine-Mode:\s"(\S+)"/i ) ).present?
+              matches_h = matches_h[0].unshift( nil )
               phase_h['Engine_Mode'] = ( matches_h[1].present? ? strtoupper(matches_h[1]) : nil)
             end
             phase_h_full = phase_h_full + body[line]
@@ -473,8 +504,9 @@ class WelcomeController < ApplicationController
     # Hack to avoid handle IPv6 by now
 
     if phase_a['ClientIP'] == '' || phase_a['ServerIP'] == ''
+
       response.headers['Status'] = '200';
-      print '\nIPv6 not supported by now, sorry\n'
+      render :text => "\nIPv6 not supported by now, sorry\n", :status => 200, :layout => false
 
       return
     end
@@ -604,11 +636,10 @@ class WelcomeController < ApplicationController
 
       event_id = insert_sth.event_id
 
-    rescue 
-		  raise
-      # response.headers['Status'] = '500';
-      # abort( "Error (insert events)" )
-      # return
+    rescue Exception => e
+      response.headers['Status'] = '500';
+      render :text => e.message, :status => 500, :layout => false
+      return
     end
 
     # Insert event full section in database
@@ -644,10 +675,11 @@ class WelcomeController < ApplicationController
       insertFull_sth.compressed = COMPRESSION
 
       insertFull_sth.save!
-    rescue 
+
+    rescue Exception => e
       response.headers['Status'] = '500';
-      raise
-      # abort( "Error (event full sections)" )
+      render :text => e.message, :status => 500, :layout => false
+      return
     end
 
     if phase_h_msg.kind_of?(Array) && event_id.present?
@@ -693,9 +725,10 @@ class WelcomeController < ApplicationController
 
                   insert_ruleMessage_sth.save!
 
-                rescue 
+                rescue Exception => e
                   response.headers['Status'] = '500';
-                  abort( "Error (insert message tag)" )
+                  render :text => e.message, :status => 500, :layout => false
+                  return
                 end
               end
             end
@@ -709,14 +742,16 @@ class WelcomeController < ApplicationController
 
               insert_ruleMessage_sth.save!
 
-            rescue
+            rescue Exception => e
               response.headers['Status'] = '500';
-              abort( "Error (insert rule message)" );
+              render :text => e.message, :status => 500, :layout => false
+              return
             end
           #end
-        rescue
+        rescue Exception => e
           response.headers['Status'] = '500';
-          abort( "Error (insert events)" )
+          render :text => e.message, :status => 500, :layout => false
+          return
         end
       end
     end
@@ -755,9 +790,9 @@ class WelcomeController < ApplicationController
         login_result['msg'] = "User, IP or Password don't match";
       end
     rescue Exception => e
-      response.headers['Status'] = '500'
-      raise e
-      abort e.message
+      response.headers['Status'] = '500';
+      render :text => e.message, :status => 500, :layout => false
+      return
     end
 
     return login_result
@@ -892,9 +927,10 @@ class WelcomeController < ApplicationController
       end
 
       webHostID = ehn.host_id
-    rescue
-      response.headers['Status'] = "500"
-      abort()
+    rescue Exception => e
+      response.headers['Status'] = '500';
+      render :text => e.message, :status => 500, :layout => false
+      return
 	  end
 
     webHostID;
@@ -902,21 +938,6 @@ class WelcomeController < ApplicationController
 
   def gzcompress(str)
     return ActiveSupport::Gzip.compress(str)
-  end
-
-
-  def echo_init
-  	@outputbuffer = ''
-  end
-
-  def echo( str )
-  	#@outputbuffer.concat( str.to_s )
-  	@outputbuffer.concat( str.inspect )
-  end
-
-  def echo_flush
-  	render :text => @outputbuffer;
-  	@outputbuffer = "";
   end
 
 end
