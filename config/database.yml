@@ -1,0 +1,24 @@
+default: &default
+  adapter: mysql2
+  encoding: utf8
+  flags:
+    - -COMPRESS
+    - FOUND_ROWS
+    - MULTI_STATEMENTS
+  secure_auth: false
+
+development:
+  <<: *default
+  database: waffle
+  username: root
+  password: password
+  host: 127.0.0.1
+  port: 3306
+
+production:
+  <<: *default
+  database: waffle
+  username: root
+  password: password
+  host: 127.0.0.1
+  port: 3306
